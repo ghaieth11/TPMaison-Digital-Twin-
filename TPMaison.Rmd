@@ -1,0 +1,119 @@
+---
+title: 'Analyse de Sensibilité et Métamodélisation : Modèle Borehole'
+author: "ALOUI Ghaieth"
+date: "27 Février 2026"
+output:
+  html_document:
+    toc: true
+    df_print: paged
+  pdf_document:
+    toc: true
+    number_sections: true
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+# Configuration globale des blocs de code
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = 'center')
+
+# Chargement des librairies nécessaires
+library(ggplot2)
+library(tidyr)
+library(sensitivity)
+library(DiceKriging)
+```
+
+## Introduction et Fonctions du Modèle
+
+Ce document présente l'étude du modèle de forage `borehole`, évaluant le débit d'eau en fonction de 13 variables d'entrée incertaines.
+
+Le débit d'eau $y$ (en $m^3/an$) traversant le forage est modélisé par l'équation analytique suivante :
+
+$$y = \frac{2 \pi T_u (H_u - H_l)}{\ln\left(\frac{r}{r_w}\right) \left[ 1 + \frac{2 L T_u}{\ln\left(\frac{r}{r_w}\right) r_w^2 K_w} + \frac{T_u}{T_l} \right]}$$
+
+Avec les variables physiques définies ainsi :
+
+-   $r_w$ : Rayon du forage (m)
+-   $r$ : Rayon d'influence (m)
+-   $T_u$ : Transmissivité de l'aquifère supérieur ($m^2/an$)
+-   $H_u$ : Hauteur potentiométrique de l'aquifère supérieur (m)
+-   $T_l$ : Transmissivité de l'aquifère inférieur ($m^2/an$)
+-   $H_l$ : Hauteur potentiométrique de l'aquifère inférieur (m)
+-   $L$ : Longueur du forage (m)
+-   $K_w$ : Conductivité hydraulique du forage ($m/an$)
+
+```{r}
+# Fonction du modèle physique
+borehole <- function(x) {
+  xx <- matrix(x, ncol=13)
+  rw  <- xx[,1]; riw <- xx[,2]; r   <- xx[,3]
+  Tu  <- xx[,4]; Hu  <- xx[,5]; Tum <- xx[,6]
+  Hum <- xx[,7]; Tlm <- xx[,8]; Hlm <- xx[,9]
+  Tl  <- xx[,10]; Hl  <- xx[,11]; L   <- xx[,12]
+  Kw  <- xx[,13]
+  
+  frac1 <- 2 * pi * Tu * (Hu-Hl)
+  frac11 <- (Tum - Tlm) * (Hum - Hlm)
+  frac2 <- frac1 / frac11
+  
+  frac2a <- 2*L*Tu / (log(r/rw)*rw^2*Kw)
+  frac2b <- Tu / Tl
+  frac2 <- log(r/rw) * (1+frac2a+frac2b)
+  
+  y <- frac1 / frac2
+  return(y)
+}
+
+# Fonction d'échantillonnage
+EchantBorehole <- function(N){
+  X = matrix(NA, N, 13)
+  X[,1] <- rnorm(N, 0.1, 0.015)
+  X[,2] <- rnorm(N, 0.05, 0.01)
+  X[,3] <- rlnorm(N, 7.71, 1.0056)
+  X[,4] <- runif(N, 63100, 116000)
+  X[,5] <- runif(N, 1000, 1100)
+  X[,6] <- runif(N, 6310, 11600)
+  X[,7] <- runif(N, 900, 1000)
+  X[,8] <- runif(N, 631, 1160)
+  X[,9] <- runif(N, 800, 900)
+  X[,10] <- runif(N, 63.1, 116)
+  X[,11] <- runif(N, 700, 800)
+  X[,12] <- runif(N, 1120, 1680)
+  X[,13] <- runif(N, 3000, 12000)
+  colnames(X) <- c("rw","riw","r","Tu","Hu","Tum","Hum","Tlm","Hlm","Tl","Hl","L","Kw")
+  return(X)
+}
+```
+
+> **Remarque importante :** Il est à noter que dans le script R fourni, la variable `frac2` est d'abord calculée puis immédiatement écrasée par la modélisation de la résistance hydraulique du forage. Par conséquent, les variables relatives à l'aquifère moyen ($T_{um}$, $T_{lm}$, $H_{um}$, $H_{lm}$) sont rendues **inactives** et n'ont aucun impact sur le résultat final.
+>
+> L'exactitude de cette implémentation analytique (sans l'aquifère moyen) est par ailleurs corroborée par la littérature de référence sur les modèles de simulation : [Virtual Library of Simulation Experiments - Borehole Function](https://www.sfu.ca/~ssurjano/borehole.html).
+>
+> *Tout le reste de l'analyse présentée dans ce document sera rigoureusement basé sur le modèle tel que décrit et implémenté dans la fonction `borehole()` fournie pour ce TP.*
+
+## Mise en place
+
+Pour cette première étape d'appropriation, nous évaluons la fonction aux bornes de son domaine de définition ainsi qu'à son point central. La variable aléatoire du rayon d'influence $r$ suit une loi lognormale. L'espérance mathématique se calcule via la formule : $$
+\mathbb{E}(r) = \exp(\mu + \frac{\sigma^2}{2})
+$$ Avec $\mu=7.71$ et $\sigma=1.0056$, nous obtenons environ $3698.24 m$.
+
+```{r}
+x_min <- c(0.05, 0.02, 100, 63100, 1000, 6310, 900, 631, 800, 63.1, 700, 1120, 3000)
+x_max <- c(0.15, 0.08, 50000, 116000, 1100, 11600, 1000, 1160, 900, 116, 800, 1680, 12000)
+
+mu_r <- 7.71; sigma_r <- 1.0056
+mean_r <- exp(mu_r + (sigma_r^2) / 2)
+
+x_mean <- c(0.10, 0.05, mean_r, 
+            mean(c(63100, 116000)), mean(c(1000, 1100)), mean(c(6310, 11600)), 
+            mean(c(900, 1000)), mean(c(631, 1160)), mean(c(800, 900)), 
+            mean(c(63.1, 116)), mean(c(700, 800)), mean(c(1120, 1680)), 
+            mean(c(3000, 12000)))
+
+resultats <- data.frame(
+  Configuration = c("Valeurs Minimales", "Valeurs Moyennes", "Valeurs Maximales"),
+  Debit_eau = c(borehole(x_min), borehole(x_mean), borehole(x_max))
+)
+knitr::kable(resultats, digits = 2, caption = "Réponse du modèle aux points caractéristiques")
+
+```
