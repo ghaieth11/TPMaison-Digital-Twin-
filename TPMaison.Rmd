@@ -23,7 +23,7 @@ library(sensitivity)
 library(DiceKriging)
 ```
 
-## Introduction et Fonctions du Modèle
+## 0) Introduction et Fonctions du Modèle
 
 Ce document présente l'étude du modèle de forage `borehole`, évaluant le débit d'eau en fonction de 13 variables d'entrée incertaines.
 
@@ -46,11 +46,19 @@ Avec les variables physiques définies ainsi :
 # Fonction du modèle physique
 borehole <- function(x) {
   xx <- matrix(x, ncol=13)
-  rw  <- xx[,1]; riw <- xx[,2]; r   <- xx[,3]
-  Tu  <- xx[,4]; Hu  <- xx[,5]; Tum <- xx[,6]
-  Hum <- xx[,7]; Tlm <- xx[,8]; Hlm <- xx[,9]
-  Tl  <- xx[,10]; Hl  <- xx[,11]; L   <- xx[,12]
-  Kw  <- xx[,13]
+  rw  <- xx[,1]; 
+  riw <- xx[,2]; 
+  r   <- xx[,3]
+  Tu  <- xx[,4]; 
+  Hu  <- xx[,5]; 
+  Tum <- xx[,6]
+  Hum <- xx[,7]; 
+  Tlm <- xx[,8]; 
+  Hlm <- xx[,9]
+  Tl  <- xx[,10]; 
+  Hl  <- xx[,11]; 
+  L   <- xx[,12];
+  Kw  <- xx[,13];
   
   frac1 <- 2 * pi * Tu * (Hu-Hl)
   frac11 <- (Tum - Tlm) * (Hum - Hlm)
@@ -87,11 +95,11 @@ EchantBorehole <- function(N){
 
 > **Remarque importante :** Il est à noter que dans le script R fourni, la variable `frac2` est d'abord calculée puis immédiatement écrasée par la modélisation de la résistance hydraulique du forage. Par conséquent, les variables relatives à l'aquifère moyen ($T_{um}$, $T_{lm}$, $H_{um}$, $H_{lm}$) sont rendues **inactives** et n'ont aucun impact sur le résultat final.
 >
-> L'exactitude de cette implémentation analytique (sans l'aquifère moyen) est par ailleurs corroborée par la littérature de référence sur les modèles de simulation : [Virtual Library of Simulation Experiments - Borehole Function](https://www.sfu.ca/~ssurjano/borehole.html).
+> L'exactitude de cette implémentation analytique (sans l'aquifère moyen) est par ailleurs confirmée par la référence sur les modèles de simulation : [Virtual Library of Simulation Experiments - Borehole Function](https://www.sfu.ca/~ssurjano/borehole.html).
 >
-> *Tout le reste de l'analyse présentée dans ce document sera rigoureusement basé sur le modèle tel que décrit et implémenté dans la fonction `borehole()` fournie pour ce TP.*
+> *Tout le reste de l'analyse présentée dans ce document sera basé sur le modèle tel que décrit et implémenté dans la fonction `borehole()` fournie pour ce TP.*
 
-## Mise en place
+## 1) Mise en place
 
 Pour cette première étape d'appropriation, nous évaluons la fonction aux bornes de son domaine de définition ainsi qu'à son point central. La variable aléatoire du rayon d'influence $r$ suit une loi lognormale. L'espérance mathématique se calcule via la formule : $$
 \mathbb{E}(r) = \exp(\mu + \frac{\sigma^2}{2})
@@ -116,4 +124,457 @@ resultats <- data.frame(
 )
 knitr::kable(resultats, digits = 2, caption = "Réponse du modèle aux points caractéristiques")
 
+```
+
+## 2) Propagation d'incertitudes par Monte Carlo
+
+### 2-a)
+
+On effectue $1000$ echantillon Monte Carlo et on calcule la moyenne et la variance de la sortie
+
+```{r}
+N <- 1000
+X_mc <- EchantBorehole(N)
+y_mc <- borehole(X_mc)
+
+cat("Moyenne empirique :", round(mean(y_mc), 2), "m3/an\n")
+cat("Variance empirique :", round(var(y_mc), 2), "(m3/an)^2\n")
+
+```
+
+Nous visualisons les Résultats dans un histogramme
+
+```{r}
+df_y <- data.frame(Debit = y_mc)
+ggplot(df_y, aes(x = Debit)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "blue", color = "black") +
+  geom_density(color = "darkred", linewidth = 1) +
+  labs(title = "Distribution du débit d'eau", x = "Débit (m3/an)", y = "Densité") +
+  theme_minimal()
+```
+
+### 2-b)
+
+Nous allons comparer la moyenne empirique par échantillons Monte Carlo et la réponse du modèle en les valeurs moyennes des variables.
+
+```{r}
+print(borehole(x_mean))
+print((mean(y_mc)))
+
+
+```
+
+On remarque que la moyenne de la réponse est supérieure à la réponse de la moyenne, ce qui est confirmé par l'inégalité de Jensen qui nous indique pour une variable aléatoire $X$ et une fonction bornée $f$ :
+
+$$
+\mathbb{E}(f(X)) \geq f(\mathbb{E}(X))
+$$
+
+Puisque qu'on a pas une égalité entre les deux quantité cela demontre la *non-linéarité* du modèle. (linéarité = Cas d'égalité de l'inégalité de Jensen)
+
+### 2-c) Calcul du quantile à 95% et intervalle de confiance (Bootstrap)
+
+À partir de notre échantillon de Monte Carlo initial (de taille $N = 1000$), nous calculons d'abord le quantile d'ordre 95% empirique. Ensuite, pour estimer l'intervalle de confiance à 95% de ce quantile, nous utilisons la méthode du rééchantillonnage (**Bootstrap**) : nous tirons notre sortie avec remise un grand nombre de fois ($B = 10000$) pour construire une distribution empirique de ce quantile, puis nous en extrayons les bornes à 2.5% et 97.5%.
+
+```{r}
+# 1. Calcul du quantile à 95% sur l'échantillon initial
+q95 <- quantile(y_mc, probs = 0.95)
+
+# 2. Estimation de l'intervalle de confiance par Bootstrap
+set.seed(42)
+B <- 10000   # Nombre de répétitions
+
+# Création d'un vecteur pour stocker les quantiles bootstrappés
+boot_quantiles <- replicate(B, {
+  echantillon_boot <- sample(y_mc, size = length(y_mc), replace = TRUE)
+  quantile(echantillon_boot, probs = 0.95)
+})
+
+# Calcul des quantiles à 2.5% et 97.5% de la distribution obtenue
+ic_95 <- quantile(boot_quantiles, probs = c(0.025, 0.975))
+
+# Affichage clair des résultats
+cat("Le quantile d'ordre 95% estimé est :", round(q95, 2), "m3/an\n")
+cat("L'intervalle de confiance à 95% de ce quantile est : [", 
+    round(ic_95[1], 2), ";", round(ic_95[2], 2), "] m3/an\n")
+```
+
+**Interprétation et détails de la méthode :**
+
+1.  **Signification du quantile à 95% :** Dans le contexte de notre modèle, le quantile à 95% représente une valeur seuil de débit d'eau. Concrètement, cela signifie que selon notre modèle et les incertitudes de nos variables d'entrée, il y a 95% de chances que le débit du forage soit inférieur ou égal à cette valeur (et inversement, seulement 5% de chances qu'il la dépasse). C'est un indicateur crucial pour l'évaluation des risques extrêmes.
+
+2.  **Principe du rééchantillonnage Bootstrap :** L'estimation de ce quantile (calculée sur notre unique échantillon Monte Carlo de taille $N = 1000$) est soumise à une incertitude statistique. Pour quantifier cette incertitude sans avoir à relancer le modèle physique `borehole()` des milliers de fois (ce qui serait très coûteux en temps de calcul dans un cas réel), nous utilisons la méthode du **Bootstrap non-paramétrique**.
+
+3.  **La démarche algorithmique étape par étape :**
+
+    -   **Tirage avec remise :** À partir de notre échantillon initial de 1000 débits, nous "piochons" aléatoirement 1000 valeurs *avec remise*. Certaines valeurs de l'échantillon initial seront sélectionnées plusieurs fois, d'autres ignorées. Cela crée un "nouvel" échantillon virtuel.
+    -   **Calcul itératif :** Sur ce nouvel échantillon, nous recalculons le quantile à 95%.
+    -   **Répétition :** Nous répétons cette opération un grand nombre de fois ($B = 10000$ fois) pour obtenir non plus une seule estimation du quantile, mais une véritable *distribution statistique* de ce quantile.
+    -   **Extraction de l'intervalle :** Enfin, nous trions ces 10000 valeurs de quantiles simulés et nous prenons les valeurs situées à 2.5% (borne inférieure) et 97.5% (borne supérieure). L'écart entre ces deux bornes nous donne notre intervalle de confiance à 95%, garantissant la robustesse de notre estimation initiale.
+
+### 2-d) Calcul de la probabilité de dépassement de seuil par Monte Carlo
+
+L'objectif est d'estimer la probabilité $p = \mathbb{P}(y > 250 \text{ m}^3/\text{an})$ à l'aide de la méthode de Monte Carlo. L'estimateur empirique de cette probabilité est donné par la moyenne de la fonction indicatrice : $$
+\hat{p} = \frac{1}{N} \sum_{i=1}^{N} \mathbf{1}_{\{y_i > 250\}}
+$$
+
+Pour s'assurer de la précision de notre estimation, nous fixons une condition d'arrêt basée sur l'**erreur relative** (définie par le coefficient de variation de l'estimateur). Celle-ci doit être inférieure ou égale à 10% (0.10). La formule de l'erreur relative $\epsilon_{rel}$ est : $$
+\epsilon_{rel} = \frac{\sqrt{\text{Var}(\hat{p})}}{\hat{p}} = \frac{\sqrt{\frac{\hat{p}(1-\hat{p})}{N}}}{\hat{p}} = \sqrt{\frac{1-\hat{p}}{N \cdot \hat{p}}} \leq 0.10
+$$
+
+Pour optimiser la gestion de la mémoire sous R (éviter de manipuler des matrices géantes d'un seul coup), nous adoptons une approche itérative "par lots" : nous générons des échantillons par paquets de $2 \cdot 10^6$, et nous mettons à jour notre probabilité globale jusqu'à atteindre le critère de convergence.
+
+```{r, fig.width=8, fig.height=5}
+# Initialisation des paramètres de la boucle
+N_total <- 0
+succes_total <- 0
+erreur_relative <- 1
+pas_N <- 2e6         # Pas d'incrément
+
+# Vecteurs pour stocker l'historique et tracer la convergence
+valeurs_N <- c()
+valeurs_p <- c()
+valeurs_err <- c()
+
+set.seed(123)
+
+# Boucle d'incrémentation jusqu'à obtenir une erreur relative <= 10%
+while(erreur_relative > 0.10) {
+  
+  # 1. Génération d'un nouveau lot de données
+  X_batch <- EchantBorehole(pas_N)
+  y_batch <- borehole(X_batch)
+  
+  # 2. Mise à jour des compteurs globaux
+  succes_total <- succes_total + sum(y_batch > 250)
+  N_total <- N_total + pas_N
+  
+  # 3. Calcul de la nouvelle probabilité estimée
+  p_est <- succes_total / N_total
+  
+  # 4. Évaluation de l'erreur relative
+  if(p_est > 0) {
+    erreur_relative <- sqrt((p_est * (1 - p_est)) / N_total) / p_est
+  } else {
+    erreur_relative <- 1 # Sécurité mathématique si p_est = 0
+  }
+  
+  # 5. Stockage pour le graphique de convergence
+  valeurs_N <- c(valeurs_N, N_total)
+  valeurs_p <- c(valeurs_p, p_est)
+  valeurs_err <- c(valeurs_err, erreur_relative)
+}
+
+#Affichage des résultats finaux
+cat("Taille d'échantillon totale nécessaire :", format(N_total, scientific = TRUE), "simulations\n")
+cat("Probabilité estimée P(y > 250)         :", p_est,"\n")
+cat("Erreur relative finale atteinte        :", round(erreur_relative * 100, 2), "%\n")
+
+#Création du graphique de convergence avec ggplot2
+library(ggplot2)
+df_conv <- data.frame(N = valeurs_N, Probabilite = valeurs_p)
+
+ggplot(df_conv, aes(x = N, y = Probabilite)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_point(color = "red", size = 2) +
+  geom_hline(yintercept = p_est, linetype = "dashed", color = "black") +
+  scale_x_continuous(labels = scales::scientific) +
+  labs(title = "Convergence de l'estimateur de la probabilité P(y > 250)",
+       subtitle = paste("Condition d'arrêt : Erreur relative < 10% (atteinte pour N =", format(N_total, scientific = TRUE), ")"),
+       x = "Taille de l'échantillon cumulée (N)",
+       y = "Probabilité estimée") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+**Interprétation du graphique de convergence :**
+
+Le graphique confirme que l'événement étudié (un débit supérieur à 250 m3/an) est extrêmement rare, avec une probabilité asymptotique de l'ordre de **2.88e-06**. Dans le cadre de la méthode de Monte Carlo, pour garantir une erreur relative de **10%**, il est nécessaire d'observer une centaine d'événements positifs. Mathématiquement, cela exige un nombre d'itérations $N \approx \frac{100}{p}$. Notre algorithme itératif valide cette théorie mathématique en atteignant le critère d'arrêt à $N = 3.6 \times 10^7$ simulations. La courbe illustre parfaitement la réduction de la variance de l'estimateur : après de fortes oscillations initiales dues à la rareté de l'événement, la probabilité empirique se stabilise et converge vers sa valeur finale (ligne pointillée).
+
+## 3) Analyse de Sensibilité
+
+### 3-a) Indices basés sur la régressions linéaires
+
+Afin d'étudier la linéarité des relations entre chaque variable d'entrée et le débit d'eau, nous générons un échantillon de taille $N = 500$ et traçons les nuages de points (scatterplots). Une courbe de tendance a été ajoutée pour faciliter l'interprétation visuelle.
+
+```{r, fig.width=10, fig.height=8}
+library(tidyr)
+
+# Génération de l'échantillon N = 500
+set.seed(123)
+N_500 <- 500
+X_500 <- as.data.frame(EchantBorehole(N_500))
+y_500 <- borehole(as.matrix(X_500))
+
+# Préparation des données pour ggplo
+df_500 <- X_500
+df_500$Debit <- y_500
+df_long <- pivot_longer(df_500, cols = -Debit, names_to = "Variable", values_to = "Valeur")
+
+# Ordre des variables pour un affichage propre
+df_long$Variable <- factor(df_long$Variable, levels = colnames(X_500))
+
+# Création des scatterplots avec lissage (pour voir la tendance)
+ggplot(df_long, aes(x = Valeur, y = Debit)) +
+  geom_point(alpha = 0.5, color = "darkcyan", size = 1) +
+  geom_smooth(method = "loess", color = "red", se = FALSE, linewidth = 0.8) +
+  facet_wrap(~ Variable, scales = "free_x", ncol = 4) +
+  labs(title = "Scatterplots : Débit d'eau en fonction des 13 variables d'entrée",
+       x = "Valeur de la variable d'entrée",
+       y = "Débit d'eau (m3/an)") +
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "lightgrey", color = "black"),
+        strip.text = element_text(face = "bold"))
+```
+
+**Interprétation visuelle des Scatterplots :**
+
+L'analyse des nuages de points et de leurs courbes de tendance (en rouge) nous permet de tirer plusieurs conclusions préliminaires sur le comportement du modèle :
+
+1.  **Variables très influentes et corrélations positives :** Les variables **`rw`** (rayon du forage) et **`Kw`** (conductivité hydraulique du forage) se détachent très nettement. On observe une forte tendance croissante : plus ces paramètres augmentent, plus le débit d'eau augmente. De plus, la courbure marquée pour `rw` indique que cette relation est **non-linéaire**.
+
+2.  **Variables faiblement influentes :** Certaines variables comme **`L`** (longueur du forage) montrent une très légère tendance (légèrement décroissante pour `L`), mais la dispersion des points reste très large, ce qui suggère une influence de premier ordre modérée.
+
+3.  **Confirmation visuelle des variables inactives :** C'est l'observation la plus importante. Les courbes de tendance pour les variables de l'aquifère moyen (**`Tum`**, **`Hum`**, **`Tlm`**, **`Hlm`**) sont **parfaitement plates**. Cela confirme visuellement notre analyse analytique précédente : ces variables sont écrasées dans le script R de la fonction et n'ont strictement aucun impact sur le débit de sortie.
+
+4.  **Limites de cette représentation :** Bien que ces graphiques soient utiles pour repérer les effets marginaux principaux (effets de premier ordre), ils ne permettent pas de visualiser les **interactions** entre les variables (par exemple, l'effet combiné de `rw` et `L`).
+
+**Conclusion de l'analyse visuelle :** La forte non-linéarité observée (notamment sur `rw`) justifie le calcul du $R^2$ de la régression linéaire globale. Si ce dernier est faible, les indices SRC basés sur cette régression seront insuffisants, ce qui nous amènera naturellement à utiliser la méthode de décomposition de la variance (Indices de Sobol).
+
+### 3-a) Suite : Indices basés sur la régression linéaire (SRC²)
+
+Afin de quantifier numériquement l'influence des variables observée sur les scatterplots, nous calculons les indices de sensibilité **SRC** (Standardized Regression Coefficients) et **SRC²**. L'indice SRC² d'une variable représente la part de la variance de la sortie qui est expliquée par l'effet *linéaire* de cette variable.
+
+Pour les estimer, nous utilisons la fonction `src()` du package `sensitivity`, couplée à un rééchantillonnage Bootstrap (`nboot = 100`) pour obtenir des intervalles de confiance. Nous calculons également le coefficient de détermination ($R^2$) du modèle linéaire global.
+
+```{r, fig.width=8, fig.height=5}
+# 1. Calcul des indices SRC avec bootstrap
+set.seed(123)
+indices_src <- src(X_500, y_500, nboot = 100)
+
+# 2. Extraction des valeurs pour calculer le SRC²
+
+df_src2 <- data.frame(
+  Variable = factor(colnames(X_500), levels = colnames(X_500)),
+  SRC2 = (indices_src$SRC$original)^2
+)
+
+# 3. Création d'un graphique avec ggplot2
+
+ggplot(df_src2, aes(x = Variable, y = SRC2, fill = SRC2)) +
+  geom_bar(stat = "identity", color = "black", alpha = 0.8) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(title = "Indices de sensibilité SRC² (Part de variance expliquée)",
+       subtitle = "Basé sur l'hypothèse d'un modèle de régression linéaire",
+       x = "Variables d'entrée",
+       y = "Indice SRC²") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+        legend.position = "none")
+```
+
+**Interprétation des indices de sensibilité** $SRC^2$ :
+
+Le graphique en barres des indices $SRC^2$ nous permet de quantifier la part de variance de la sortie expliquée par chaque variable, sous l'hypothèse stricte d'un modèle linéaire.
+
+1.  **Variables dominantes (Effets linéaires principaux) :** Les variables **`Kw`** (conductivité hydraulique du forage) et **`rw`** (rayon du forage) dominent très largement le modèle linéaire. À elles seules, elles expliquent la quasi-totalité de la variance capturée par la régression linéaire (avec un $SRC^2$ d'environ 0.49 pour `Kw` et 0.33 pour `rw`).
+
+2.  **Variables secondaires :** Les variables **`L`**, **`Hl`** et **`Hu`** ont une influence mineure mais non négligeable (chacune expliquant environ 4 à 5% de la variance linéaire).
+
+3.  **Variables inactives confirmées :** Comme anticipé lors de l'analyse du code source et des scatterplots, les variables de l'aquifère moyen (`Tum`, `Hum`, `Tlm`, `Hlm`) ont un indice $SRC^2$ strictement égal à 0, confirmant qu'elles n'interviennent pas dans le calcul final du débit.
+
+4.  **Limites de l'approche et nécessité d'aller plus loin :** Bien que ce graphique identifie les variables ayant un fort effet proportionnel, l'indice $SRC^2$ est aveugle aux interactions entre les variables et aux effets fortement non-linéaires. Par exemple, des variables comme le rayon d'influence (`r`) ou la transmissivité (`Tu`) apparaissent ici comme non influentes linéairement, alors qu'elles interviennent dans des termes logarithmiques ou des ratios complexes de l'équation physique.
+
+*C'est pourquoi, comme suggéré par l'inégalité de Jensen à la question 2-b. cette analyse n'est pas suffisante car elle a une limite majeure : elle analyse seulement les relations du premier ordre et pas les effets des interactions entre les entrées. Nous devons passer au calcul des indices de Sobol'*
+
+### 3-b) Calcul et interprétation des indices de Sobol'
+
+Pour capturer l'ensemble des effets (linéaires, non-linéaires et les interactions), nous utilisons l'analyse de variance via les indices de Sobol'. En nous basant sur les méthodes abordées lors du TP4, nous choisissons l'estimateur de **Martinez** (`sobolmartinez()`). Cette fonction est particulièrement adaptée car elle est robuste et permet le calcul simultané des indices de premier ordre ($S_i$) et totaux ($S_{T_i}$), tout en contrôlant la précision de nos estimations grâce au rééchantillonnage Bootstrap (`nboot = 100`).
+
+Nous choisissons une taille d'échantillon $N = 10000$ pour les deux matrices indépendantes $X_1$ et $X_2$, ce qui offre un excellent compromis entre la convergence des estimateurs et le temps de calcul.
+
+```{r, fig.width=8, fig.height=5}
+
+# 1. Génération des échantillons (N = 10000)
+n_sobol <- 10000
+set.seed(42)
+X1 <- EchantBorehole(n_sobol)
+X2 <- EchantBorehole(n_sobol)
+
+# Wrapper pour s'assurer que la sortie est bien un vecteur numérique
+wrap_borehole <- function(X) { as.numeric(borehole(as.matrix(X))) }
+
+# 2. Calcul des indices de Sobol SANS bootstrap (nboot = 0)
+sa_borehole <- sobolmartinez(model = wrap_borehole, X1 = X1, X2 = X2, nboot = 100)
+
+print(sa_borehole)
+# 3. Graphique natif propre
+plot(sa_borehole, main = "Indices de Sobol' (1er Ordre et Totaux)")
+
+```
+
+```{r}
+df_sobol <- data.frame(
+  Variable = factor(rownames(sa_borehole$S), levels = rownames(sa_borehole$S)),
+  Premier_Ordre = sa_borehole$S$original,
+  Premier_Ordre_min = sa_borehole$S$`min. c.i.`,
+  Premier_Ordre_max = sa_borehole$S$`max. c.i.`,
+  Total = sa_borehole$T$original,
+  Total_min = sa_borehole$T$`min. c.i.`,
+  Total_max = sa_borehole$T$`max. c.i.`
+)
+
+# Passage en format long pour faciliter la superposition sur ggplot
+df_long_sobol <- data.frame(
+  Variable = rep(df_sobol$Variable, 2),
+  Type = rep(c("1 - Premier Ordre (Effet principal)", "2 - Total (Principal + Interactions)"), each = nrow(df_sobol)),
+  Valeur = c(df_sobol$Premier_Ordre, df_sobol$Total),
+  Min = c(df_sobol$Premier_Ordre_min, df_sobol$Total_min),
+  Max = c(df_sobol$Premier_Ordre_max, df_sobol$Total_max)
+)
+
+# 4. Graphe des indices de Sobol avec intervalles de confiance
+ggplot(df_long_sobol, aes(x = Variable, y = Valeur, fill = Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), color = "black", width = 0.7) +
+  geom_errorbar(aes(ymin = Min, ymax = Max), position = position_dodge(width = 0.8), width = 0.25) +
+  scale_fill_manual(values = c("lightblue", "darkblue")) +
+  labs(title = "Indices de Sobol' du 1er Ordre et Totaux (Estimateur de Martinez)",
+       subtitle = paste("Échantillon N =", n_sobol, "| Intervalles de confiance à 95% par Bootstrap (100 rééchantillonnages)"),
+       x = "Variables d'entrée",
+       y = "Indice de Sensibilité") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+        legend.position = "top",
+        legend.title = element_blank())
+```
+
+**Utilisation des outils d'interprétation quantitatifs :**
+
+Afin d'aller plus loin que la simple observation visuelle, nous appliquons les outils de diagnostic standards de l'analyse de variance pour interpréter nos indices de Sobol' :
+
+```{r}
+# Extraction des valeurs originales (estimations ponctuelles)
+S_i <- sa_borehole$S$original
+S_Ti <- sa_borehole$T$original
+noms_var <- rownames(sa_borehole$S)
+
+# Outil 1 : Degré d'additivité du modèle (Somme des indices de 1er ordre)
+somme_S <- sum(S_i, na.rm = TRUE)
+cat("La somme des indices de 1er ordre est de :", round(somme_S, 3), "\n")
+cat("Part de variance due aux interactions globales :", round((1 - somme_S)*100, 1), "%\n\n")
+
+# Outil 2 : Interactions pures par variable (S_Ti - S_i)
+interactions <- S_Ti - S_i
+df_outils <- data.frame(
+  Variable = noms_var,
+  S_i = round(S_i, 3),
+  S_Ti = round(S_Ti, 3),
+  Interaction_pure = round(interactions, 3)
+)
+
+# Tri par indice total décroissant pour hiérarchiser les paramètres
+df_outils <- df_outils[order(-df_outils$S_Ti), ]
+
+# Outil 3 : Screening (Seuil de significativité)
+df_outils$Statut <- ifelse(df_outils$S_Ti < 0.01, "Négligeable", "Influente")
+
+# Affichage du tableau de synthèse
+knitr::kable(df_outils, row.names = FALSE, 
+             caption = "Diagnostic quantitatif des indices de Sobol'")
+```
+
+**Synthèse de l'interprétation quantitative :**
+
+L'application des outils de diagnostic sur nos indices de Sobol' nous permet de tirer les conclusions définitives suivantes :
+
+1.  **Degré d'additivité du modèle :** La somme des indices de premier ordre s'élève à **0.942**. Cela prouve quantitativement que le modèle `borehole` est majoritairement additif. Toutefois, environ **5.8 % de la variabilité totale** du débit d'eau est pilotée exclusivement par des interactions entre les paramètres (effets conjoints).
+
+2.  **Localisation des interactions :** La colonne des "Interactions pures" ($S_{T_i} - S_i$) confirme que c'est la variable `Kw` (conductivité hydraulique) qui interagit le plus avec les autres (0.060), suivie de près par `rw` (0.043) et `L` (0.017). Cela reflète la structure du dénominateur de l'équation mathématique du forage, où ces termes sont couplés multiplicativement dans le calcul de la résistance hydraulique.
+
+3.  **Screening et simplification du modèle :** En appliquant un seuil de coupure pragmatique de 1% ($S_{T_i} < 0.01$) sur les indices totaux, l'outil de *screening* nous permet de diviser nos 13 variables en deux groupes distincts :
+
+    -   **Variables influentes (5) :** `Kw`, `rw`, `L`, `Hu`, et `Hl` dirigent à elles seules plus de 99% de la variance du modèle.
+    -   **Variables négligeables (8) :** Les variables de l'aquifère moyen, ainsi que `riw`, `r`, `Tu` et `Tl` n'ont aucune influence significative. Le modèle de forage pourrait donc être mathématiquement réduit à 5 variables actives sans perte d'information majeure.
+
+> **Note sur le bruit numérique :** L'apparition de très légères valeurs négatives pour les interactions pures de certaines variables inactives (ex: -0.001) est un artefact classique de la méthode d'estimation par Monte Carlo (bruit numérique des estimateurs). Cela confirme que leur vraie valeur théorique est 0.
+
+# 4) Ajustement et utilisation d'un métamodèle de krigeage
+
+### 4-a) Ajustement, validation ($Q^2$) et comparaison avec la régression linéaire
+
+Pour pallier les limites du modèle de régression linéaire, nous ajustons un métamodèle basé sur les processus gaussiens (Krigeage) sur notre échantillon d'apprentissage de taille $N = 500$.
+
+Nous utilisons le package `DiceKriging` vu en cours. Nous choisissons un noyau de covariance de type **Matérn 5/2** (`covtype="matern5_2"`), particulièrement adapté pour modéliser des fonctions physiques régulières. Pour valider ce métamodèle en dimension 13, nous utilisons la validation croisée *Leave-One-Out* (LOO), qui permet d'estimer le coefficient de prédictivité $Q^2$ sans avoir recours à un nouvel échantillon de test.
+
+```{r, message=FALSE, warning=FALSE}
+library(DiceKriging)
+
+# 1. Ajustement du modèle de Krigeage avec noyau Matern 5/2
+set.seed(123)
+krig <- km(formula = ~1, design = X_500, response = y_500, 
+           covtype = "matern5_2")
+
+# 2. Validation croisée Leave-One-Out (LOO) pour estimer la précision
+loo <- leaveOneOut.km(krig, type = "UK")
+
+# 3. Calcul du coefficient de prédictivité Q²
+residus_loo <- loo$mean - y_500
+Q2 <- 1 - mean(residus_loo^2) / var(y_500)
+
+# Rappel du R² de la régression linéaire (Question 3a)
+r2_lm <- summary(lm(y_500 ~ ., data = as.data.frame(X_500)))$r.squared
+
+cat("R² du modèle de régression linéaire :", round(r2_lm, 4), "\n")
+cat("Q² du métamodèle de krigeage (LOO)  :", round(Q2, 4), "\n")
+```
+
+**3. Améliore-t-il le modèle de régression linéaire ? (Interprétation des résultats)**
+
+**Oui, l'amélioration est significative et mathématiquement cohérente.** \* **Le plafond du modèle linéaire :** La régression linéaire classique obtient un $R^2$ de **0.9419**. Fait remarquable : cette valeur correspond très exactement à la somme des indices de Sobol' du 1er ordre (0.942) que nous avons calculée à la question précédente. Cela prouve que le modèle linéaire a parfaitement capté la part additive (les effets principaux) de la fonction `borehole`, mais qu'il est structurellement incapable d'aller plus loin. Il ignore les \~6% de variance liés aux interactions. \* **La supériorité du Krigeage :** Le métamodèle de krigeage, en revanche, atteint un $Q^2$ de **0.9952** (soit une précision de 99.5% sur de nouvelles données). Grâce à sa structure spatiale (le processus gaussien), il agit comme une toile flexible qui s'ajuste aux courbures de la fonction en dimension 13. Il a implicitement "appris" les interactions entre les paramètres (notamment le couplage entre $K_w$, $r_w$ et $L$ au dénominateur).
+
+**Conclusion :** Le krigeage améliore nettement la régression linéaire en comblant l'écart de variance manquante. Il remplace donc de manière extrêmement fiable le modèle physique tout en étant infiniment plus rapide à évaluer.
+
+```{r}
+# 3. Création du graphique Prédit vs Réel
+df_krig <- data.frame(Reel = y_500, Predit = loo$mean)
+
+ggplot(df_krig, aes(x = Reel, y = Predit)) +
+  geom_point(color = "darkcyan", alpha = 0.7) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed", linewidth = 1) +
+  labs(title = "Validation du Krigeage : Débit Pédit vs Débit Réel",
+       subtitle = "Validation croisée Leave-One-Out sur 500 points",
+       x = "Débit réel (calculé par la fonction Borehole)",
+       y = "Débit prédit (par le métamodèle de Krigeage)") +
+  theme_bw()
+```
+
+### 4-b) Calcul des indices de Sobol' à l'aide du métamodèle
+
+Puisque notre métamodèle de krigeage a un $Q^2$ exceptionnel (0.9952), nous pouvons l'utiliser pour remplacer le modèle physique lourd lors du calcul des indices de Sobol'. L'avantage est que le krigeage est beaucoup plus rapide à évaluer sur des dizaines de milliers de points.
+
+Nous utilisons la méthodologie vue en cours : création d'un plan d'expérience vide avec `sobolmartinez(model = NULL)`, prédiction des réponses via le métamodèle avec `predict.km()`, et intégration des résultats avec la fonction `tell()`. Nous reprenons la même taille d'échantillon ($N = 10000$) qu'à la question 3 pour comparer équitablement les résultats.
+
+```{r, fig.width=8, fig.height=5, message=FALSE, warning=FALSE}
+
+# 1. Génération des échantillons d'entrée
+n_sobol_krig <- 10000
+set.seed(123)
+X1_krig <- EchantBorehole(n_sobol_krig)
+X2_krig <- EchantBorehole(n_sobol_krig)
+
+# 2. Initialisation de l'objet Sobol (modèle = NULL)
+sa_krig <- sobolmartinez(model = NULL, X1 = X1_krig, X2 = X2_krig, nboot = 100)
+
+# 3. Prédiction des réponses sur le plan d'expérience (150 000 points) par le Krigeage
+# Le krigeage calcule instantanément les prédictions
+pred_krig <- predict.km(krig, newdata = sa_krig$X, type = "UK", checkNames = FALSE, se.compute = FALSE)
+
+tell(sa_krig, pred_krig$mean)
+
+# 5. Affichage des résultats
+knitr::kable(sa_krig$S, digits = 4, caption = "Indices de 1er Ordre (via Krigeage)")
+knitr::kable(sa_krig$T, digits = 4, caption = "Indices Totaux (via Krigeage)")
+
+# 6. Graphique des indices
+plot(sa_krig, main = "Indices de Sobol' estimés sur le métamodèle de Krigeage")
 ```
